@@ -72,7 +72,7 @@ class VidStab:
         self._smoothing_window = 30
         self._raw_transforms = []
         self._trajectory = []
-        self.trajectory = self.smoothed_trajectory = self.transforms = None
+        self.trajectory = self.smoothed_trajectory = self.transforms = self.raw_transforms = None
 
         self.frame_queue = FrameQueue()
         self.prev_kps = self.prev_gray = None
@@ -238,6 +238,7 @@ class VidStab:
         self.trajectory = np.array(self._trajectory)
         self.smoothed_trajectory = general_utils.bfill_rolling_mean(self.trajectory, n=self._smoothing_window)
         self.transforms = np.array(self._raw_transforms) + (self.smoothed_trajectory - self.trajectory)
+        self.raw_transforms = np.array(self._raw_transforms)
 
     def gen_transforms(self, input_path, smoothing_window=30, show_progress=True):
         """Generate stabilizing transforms for a video
