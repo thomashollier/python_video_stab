@@ -8,6 +8,7 @@ import time
 import warnings
 import cv2
 import numpy as np
+import imutils
 import imutils.feature.factories as kp_factory
 import matplotlib.pyplot as plt
 from . import general_utils
@@ -37,23 +38,51 @@ class VidStab:
                         ``["GFTT", "BRISK", "DENSE", "FAST", "HARRIS", "MSER", "ORB", "STAR"]``.
                         ``["SIFT", "SURF"]`` are additional non-free options available depending
                         on your build of OpenCV.  The non-free detectors are not tested with this package.
+    :param processing_max_dim: Working with large frames can harm performance (especially in live video).
+                                   Setting this parameter can restrict frame size while processing.
+                                   The outputted frames will remain the original size.
+
+                                   For example:
+
+                                   * If an input frame shape is `(200, 400, 3)` and `processing_max_dim` is
+                                     100.  The frame will be resized to `(50, 100, 3)` before processing.
+
+                                   * If an input frame shape is `(400, 200, 3)` and `processing_max_dim` is
+                                     100.  The frame will be resized to `(100, 50, 3)` before processing.
+
+                                   * If an input frame shape is `(50, 50, 3)` and `processing_max_dim` is
+                                     100.  The frame be unchanged for processing.
+
     :param args: Positional arguments for keypoint detector.
     :param kwargs: Keyword arguments for keypoint detector.
 
     :ivar kp_method: a string naming the keypoint detector being used
+    :ivar processing_max_dim: max image dimension while processing transforms
     :ivar kp_detector: the keypoint detector object being used
     :ivar trajectory: a 2d showing the trajectory of the input video
     :ivar smoothed_trajectory: a 2d numpy array showing the smoothed trajectory of the input video
     :ivar transforms: a 2d numpy array storing the transformations used from frame to frame
     """
 
-    def __init__(self, kp_method='GFTT', *args, **kwargs):
+    def __init__(self, kp_method='GFTT', processing_max_dim=float('inf'), *args, **kwargs):
         """instantiate VidStab class
 
         :param kp_method: String of the type of keypoint detector to use. Available options are:
                         ``["GFTT", "BRISK", "DENSE", "FAST", "HARRIS", "MSER", "ORB", "STAR"]``.
                         ``["SIFT", "SURF"]`` are additional non-free options available depending
                         on your build of OpenCV.  The non-free detectors are not tested with this package.
+        :param processing_max_dim: Working with large frames can harm performance (especially in live video).
+                                   Setting this parameter can restrict frame size while processing.
+                                   The outputted frames will remain the original size.
+
+                                   For example:
+                                     * If an input frame shape is `(200, 400, 3)` and `processing_max_dim` is
+                                   100.  The frame will be resized to `(50, 100, 3)` before processing.
+                                     * If an input frame shape is `(400, 200, 3)` and `processing_max_dim` is
+                                   100.  The frame will be resized to `(100, 50, 3)` before processing.
+                                     * If an input frame shape is `(50, 50, 3)` and `processing_max_dim` is
+                                   100.  The frame be unchanged for processing.
+
         :param args: Positional arguments for keypoint detector.
         :param kwargs: Keyword arguments for keypoint detector.
         """
@@ -68,6 +97,9 @@ class VidStab:
                                                                  blockSize=3)
         else:
             self.kp_detector = kp_factory.FeatureDetector_create(kp_method, *args, **kwargs)
+
+        self.processing_max_dim = processing_max_dim
+        self._processing_resize_kwargs = {}
 
         self._smoothing_window = 30
         self._raw_transforms = []
@@ -91,6 +123,26 @@ class VidStab:
 
         self._default_stabilize_frame_output = None
 
+    def _resize_frame(self, frame):
+        if self._processing_resize_kwargs == {}:
+            if self.processing_max_dim:
+                shape = frame.shape
+                max_dim_size = max(shape)
+
+                if max_dim_size <= self.processing_max_dim:
+                    self.processing_max_dim = max_dim_size
+                    self._processing_resize_kwargs = None
+                else:
+                    max_dim_ind = shape.index(max_dim_size)
+                    max_dim_name = ['height', 'width'][max_dim_ind]
+                    self._processing_resize_kwargs = {max_dim_name: self.processing_max_dim}
+
+        if self._processing_resize_kwargs is None:
+            return frame
+
+        resized = imutils.resize(frame, **self._processing_resize_kwargs)
+        return resized
+
     def _update_prev_frame(self, current_frame_gray):
         self.prev_gray = current_frame_gray[:]
         self.prev_kps = self.kp_detector.detect(self.prev_gray)
@@ -107,6 +159,7 @@ class VidStab:
     def _gen_next_raw_transform(self):
         current_frame = self.frame_queue.frames[-1]
         current_frame_gray = current_frame.gray_image
+        current_frame_gray = self._resize_frame(current_frame_gray)
 
         # calc flow of movement
         optical_flow = cv2.calcOpticalFlowPyrLK(self.prev_gray,
@@ -136,9 +189,15 @@ class VidStab:
     def _process_first_frame(self, array=None):
         # read first frame
         _, _, _ = self.frame_queue.read_frame(array=array, pop_ind=False)
+
+        if array is None and len(self.frame_queue.frames) == 0:
+            raise ValueError('First frame is None. Check if input file/stream is correct.')
+
         # convert to gray scale
         prev_frame = self.frame_queue.frames[-1]
         prev_frame_gray = prev_frame.gray_image
+        prev_frame_gray = self._resize_frame(prev_frame_gray)
+
         # detect keypoints
         prev_kps = self.kp_detector.detect(prev_frame_gray)
         # noinspection PyArgumentList
@@ -231,6 +290,7 @@ class VidStab:
             self.writer.write(transformed)
 
         self.writer.release()
+        self.writer = None
         general_utils.update_progress_bar(progress_bar, finish=True)
         cv2.destroyAllWindows()
 
@@ -239,6 +299,14 @@ class VidStab:
         self.smoothed_trajectory = general_utils.bfill_rolling_mean(self.trajectory, n=self._smoothing_window)
         self.transforms = np.array(self._raw_transforms) + (self.smoothed_trajectory - self.trajectory)
         self.raw_transforms = np.array(self._raw_transforms)
+
+        # Dump superfluous frames
+        # noinspection PyProtectedMember
+        n = self.frame_queue._max_frames
+        if n:
+            self.trajectory = self.trajectory[:n - 1, :]
+            self.smoothed_trajectory = self.smoothed_trajectory[:n - 1, :]
+            self.transforms = self.transforms[:n - 1, :]
 
     def gen_transforms(self, input_path, smoothing_window=30, show_progress=True):
         """Generate stabilizing transforms for a video
@@ -473,6 +541,8 @@ class VidStab:
         >>> stabilizer = VidStab(kp_method = 'ORB')
         >>> stabilizer.stabilize(input_path='input_video.mov', output_path='stable_video.avi')
         """
+        self.writer = None
+
         if border_size == 'auto':
             self.auto_border_flag = True
 

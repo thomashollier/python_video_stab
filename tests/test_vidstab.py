@@ -1,3 +1,4 @@
+import os
 import tempfile
 import cv2
 import imutils
@@ -11,9 +12,9 @@ from .pickled_transforms import download_pickled_transforms, pickle_test_transfo
 # atol value to use when comparing results using np.allclose
 NP_ALLCLOSE_ATOL = 1e-3
 
-# excluding non-free "SIFT" & "SURF" methods do to exclusion from opencv-contrib-python
+# excluding non-free 'SIFT' & 'SURF' methods do to exclusion from opencv-contrib-python
 # see: https://github.com/skvark/opencv-python/issues/126
-KP_METHODS = ["GFTT", "BRISK", "DENSE", "FAST", "HARRIS", "MSER", "ORB", "STAR"]
+KP_METHODS = ['GFTT', 'BRISK', 'DENSE', 'FAST', 'HARRIS', 'MSER', 'ORB', 'STAR']
 
 tmp_dir = tempfile.TemporaryDirectory()
 TRUNCATED_OSTRICH_VIDEO = '{}/trunc_vid.avi'.format(tmp_dir.name)
@@ -44,14 +45,21 @@ def test_kp_options():
 def test_invalid_input_path():
     stabilizer = VidStab(kp_method='FAST', threshold=42, nonmaxSuppression=False)
     with pytest.raises(FileNotFoundError) as err:
-        stabilizer.gen_transforms("fake_input_path.mp4")
+        stabilizer.gen_transforms('fake_input_path.mp4')
 
-    assert "fake_input_path.mp4 does not exist" in str(err.value)
+    assert 'fake_input_path.mp4 does not exist' in str(err.value)
 
     with pytest.raises(FileNotFoundError) as err:
-        stabilizer.stabilize("fake_input_path.mp4", "output.avi")
+        stabilizer.stabilize('fake_input_path.mp4', 'output.avi')
 
-    assert "fake_input_path.mp4 does not exist" in str(err.value)
+    assert 'fake_input_path.mp4 does not exist' in str(err.value)
+
+    with pytest.raises(ValueError) as err:
+        tmp_file = tempfile.NamedTemporaryFile(suffix='.mp4')
+        with pytest.warns(UserWarning, match='No progress bar will be shown'):
+            stabilizer.stabilize(tmp_file.name, 'output.avi')
+
+    assert 'First frame is None' in str(err.value)
 
 
 def test_video_dep_funcs_run():
@@ -79,8 +87,8 @@ def check_transforms(stabilizer, is_cv4=True):
 
 def test_trajectory_transform_values():
     for window in [15, 30, 60]:
-        stabilizer = VidStab()
-        stabilizer.gen_transforms(input_path=OSTRICH_VIDEO, smoothing_window=window)
+        stabilizer = VidStab(processing_max_dim=float('inf'))
+        stabilizer.stabilize(input_path=OSTRICH_VIDEO, output_path='stable.avi', smoothing_window=window)
 
         pickle_test_transforms(stabilizer, 'pickled_transforms')
 
@@ -89,12 +97,12 @@ def test_trajectory_transform_values():
 
 def test_stabilize_frame():
     # Init stabilizer and video reader
-    stabilizer = VidStab()
+    stabilizer = VidStab(processing_max_dim=float('inf'))
     vidcap = cv2.VideoCapture(OSTRICH_VIDEO)
 
     window_size = 30
     while True:
-        grabbed_frame, frame = vidcap.read()
+        _, frame = vidcap.read()
 
         # Pass frame to stabilizer even if frame is None
         stabilized_frame = stabilizer.stabilize_frame(input_frame=frame,
@@ -107,6 +115,36 @@ def test_stabilize_frame():
     check_transforms(stabilizer, is_cv4=imutils.is_cv4())
 
 
-if __name__ == '__main__':
-    test_trajectory_transform_values()
-    test_stabilize_frame()
+def test_resize():
+    # Init stabilizer and video reader
+    max_dim = 30
+    stabilizer = VidStab(processing_max_dim=max_dim)
+    assert stabilizer.processing_max_dim == max_dim
+
+    # noinspection PyProtectedMember
+    assert stabilizer._processing_resize_kwargs == {}
+
+    vidcap = cv2.VideoCapture(OSTRICH_VIDEO)
+
+    _, frame = vidcap.read()
+    _ = stabilizer.stabilize_frame(input_frame=frame, smoothing_window=1)
+
+    _, frame = vidcap.read()
+    stabilized_frame = stabilizer.stabilize_frame(input_frame=frame, smoothing_window=1)
+
+    assert stabilized_frame.shape == (446, 876, 3)
+    assert max(stabilizer.prev_gray.shape) <= max_dim
+
+    # noinspection PyProtectedMember
+    assert stabilizer._processing_resize_kwargs == {'width': max_dim}
+
+
+def test_writer_reset():
+    path_1 = 'stable_1.avi'
+    path_2 = 'stable_2.avi'
+    stabilizer = VidStab()
+    stabilizer.stabilize(OSTRICH_VIDEO, path_1, max_frames=16, smoothing_window=1)
+    stabilizer.stabilize(OSTRICH_VIDEO, path_2, max_frames=16, smoothing_window=1)
+
+    assert os.path.exists(path_1)
+    assert os.path.exists(path_2)
